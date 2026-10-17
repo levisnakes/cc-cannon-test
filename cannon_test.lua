@@ -1,4 +1,4 @@
--- Cannon Test v1.2.0
+-- Cannon Test v1.3.0
 -- Test + calibrate a Create Radar turret (Auto Yaw/Pitch Controller + Fire Controller) from CC.
 -- Type "help" for commands. Calibration is saved to cannon.cfg.
 
@@ -326,6 +326,7 @@ local HELP = {
   "burst <sec>       hold the trigger",
   "stop              cease fire + release controllers",
   "pos x y z | pos gps   cannon position (for aiming)",
+  "yawzero <dir>      which way yaw 0 pointed (north/east/south/west)",
   "yawoff <deg> | yawflip | pitchoff <deg> | pitchflip",
   "tracks / aimat <n>     list radar contacts / point at one",
   "sable             follow the nearest Sable ship (no firing)",
@@ -373,6 +374,18 @@ local function run()
       if setCannonPos(a, b, tonumber(w[4])) then
         saveCfg(); print(onShip and "saved - it now follows the ship" or "saved")
       else say(colors.red, "can't read the ship's position") end
+    elseif c == "yawzero" and w[2] then
+      -- "yaw 0 points <dir>": set the offset, allowing for how the ship is turned right now
+      local dirs = { south = { 0, 1 }, west = { -1, 0 }, north = { 0, -1 }, east = { 1, 0 } }
+      local d = dirs[w[2]:lower()]
+      if not d then say(colors.red, "use: yawzero north|east|south|west")
+      else
+        local v = { x = d[1], y = 0, z = d[2] }
+        local _, q = shipPose()
+        if q then v = qrot(qinv(q), v) end
+        cfg.yawOffset = math.floor((-(math.deg(atan2(-v.x, v.z)) * cfg.yawSign) % 360) + 0.5) % 360
+        saveCfg(); print("yaw offset " .. cfg.yawOffset .. " - check with aimat")
+      end
     elseif c == "yawoff" and a then cfg.yawOffset = a; saveCfg(); print("saved")
     elseif c == "pitchoff" and a then cfg.pitchOffset = a; saveCfg(); print("saved")
     elseif c == "yawflip" then cfg.yawSign = -cfg.yawSign; saveCfg(); print("yaw sign " .. cfg.yawSign)

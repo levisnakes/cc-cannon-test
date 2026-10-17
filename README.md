@@ -31,6 +31,7 @@ You don't need Data Links or a Network Controller for CC control.
 | `burst <sec>` | hold the trigger (max 10s, any key stops) |
 | `stop` | cease fire and release the controllers |
 | `pos x y z` / `pos gps` | cannon position, needed for aiming at radar contacts |
+| `yawzero <dir>` | after `sweep`: which way yaw 0 pointed (north/east/south/west); sets the offset, allowing for ship rotation |
 | `yawoff` `yawflip` `pitchoff` `pitchflip` | calibration, saved to `cannon.cfg` |
 | `tracks` / `aimat <n>` | list radar contacts by distance, point straight at one |
 | `sable` | follow the nearest Sable ship (keeps the same ship while it's visible, ignores anything within 12 blocks) |
