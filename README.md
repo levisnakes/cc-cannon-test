@@ -33,6 +33,8 @@ You don't need Data Links or a Network Controller for CC control.
 | `pos x y z` / `pos gps` | cannon position, needed for aiming at radar contacts |
 | `yawoff` `yawflip` `pitchoff` `pitchflip` | calibration, saved to `cannon.cfg` |
 | `tracks` / `aimat <n>` | list radar contacts by distance, point straight at one |
+| `sable` | follow the nearest Sable ship (keeps the same ship while it's visible, ignores anything within 12 blocks) |
+| `sable fire` | same, and shoots once the aim settles (needs `arm`) |
 
 `aimat` assumes Minecraft yaw (0 = south, 90 = west, 180 = north, 270 = east) and aims in a straight line with no shell drop. Use `sweep`, then `yawoff`/`yawflip` until `aimat` points the right way.
 

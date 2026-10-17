@@ -1,10 +1,13 @@
--- Cannon Test v1.0.0
+-- Cannon Test v1.1.0
 -- Test + calibrate a Create Radar turret (Auto Yaw/Pitch Controller + Fire Controller) from CC.
 -- Type "help" for commands. Calibration is saved to cannon.cfg.
 
 local FIRE_SECONDS_MAX = 10   -- longest burst allowed
 local SWEEP_WAIT = 4          -- seconds per step in "sweep"
 local CFG_FILE = "cannon.cfg"
+local TRACK_STEP = 0.25       -- seconds between aim updates when tracking
+local AIM_TOLERANCE = 3       -- degrees the aim may move per step and still count as on target
+local MIN_TARGET_DIST = 12    -- ignore Sable tracks this close (your own turret/ship)
 
 local cfg = { x = nil, y = nil, z = nil, yawOffset = 0, yawSign = 1, pitchOffset = 0, pitchSign = 1 }
 local armed = false
@@ -54,8 +57,8 @@ end
 local function findAll()
   yawC, pitchC, fireC, radar = nil, nil, nil, nil
   for _, n in ipairs(names()) do
-    if isType(n, "yaw_controller") then yawC = yawC or n
-    elseif isType(n, "pitch_controller") then pitchC = pitchC or n
+    if isType(n, "auto_yaw_controller") or isType(n, "yaw_controller") then yawC = yawC or n
+    elseif isType(n, "auto_pitch_controller") or isType(n, "pitch_controller") then pitchC = pitchC or n
     elseif isType(n, "fire_controller") then fireC = fireC or n
     elseif hasMethod(n, "getTracks") and hasMethod(n, "getRange") then radar = radar or n end
   end
@@ -179,6 +182,57 @@ local function aimAt(i)
   setYaw(yaw); setPitch(pitch)
 end
 
+-- follow the nearest Sable ship; with fire=true, shoot once the aim settles
+local function trackSable(fire)
+  if not cfg.x then say(colors.red, "set the cannon position first: pos x y z"); return end
+  if not radar then say(colors.red, "no radar connected"); return end
+  if fire and not armed then say(colors.red, "SAFE - type arm first (or use: sable)"); return end
+  say(colors.yellow, "Tracking nearest SABLE" .. (fire and " + FIRING" or "") .. " - any key stops")
+  local lockId, lastYaw, lastPitch
+  local timer = os.startTimer(0)
+  local _, row = term.getCursorPos()
+  while true do
+    local ev = { os.pullEvent() }
+    if ev[1] == "key" or ev[1] == "char" then break end
+    if ev[1] == "timer" and ev[2] == timer then
+      timer = os.startTimer(TRACK_STEP)
+      local best, bestD, locked
+      for _, t in pairs(call(radar, "getTracks") or {}) do
+        if t.category == "SABLE" and t.position then
+          local d = select(3, anglesTo(t.position.x, t.position.y, t.position.z))
+          if d >= MIN_TARGET_DIST then
+            if lockId ~= nil and t.id == lockId then locked = t end
+            if not bestD or d < bestD then best, bestD = t, d end
+          end
+        end
+      end
+      local t = locked or best
+      local line
+      if not t then
+        lockId, lastYaw = nil, nil
+        fireOff()
+        line = "no Sable in range"
+      else
+        lockId = t.id
+        local yaw, pitch, d = anglesTo(t.position.x, t.position.y, t.position.z)
+        call(yawC, "setAngle", yaw)
+        call(pitchC, "setAngle", pitch)
+        -- aim counts as settled when the target angle barely moved since last step
+        local steady = lastYaw and math.abs(((yaw - lastYaw + 180) % 360) - 180) < AIM_TOLERANCE
+          and math.abs(pitch - lastPitch) < AIM_TOLERANCE
+        lastYaw, lastPitch = yaw, pitch
+        local shooting = fire and armed and steady and d <= (call(radar, "getRange") or 0)
+        if shooting then call(fireC, "keepFiring") else fireOff() end
+        line = string.format("SHIP %s  %.0fm  yaw %.1f pitch %.1f %s", tostring(t.id):sub(1, 6), d, yaw, pitch,
+          shooting and "FIRE" or (steady and "on target" or "turning"))
+      end
+      term.setCursorPos(1, row); term.clearLine(); write(line)
+    end
+  end
+  fireOff()
+  print(""); print("tracking stopped")
+end
+
 local HELP = {
   "status            what's connected",
   "yaw <deg>         turn the mount",
@@ -192,6 +246,8 @@ local HELP = {
   "pos x y z | pos gps   cannon position (for aiming)",
   "yawoff <deg> | yawflip | pitchoff <deg> | pitchflip",
   "tracks / aimat <n>     list radar contacts / point at one",
+  "sable             follow the nearest Sable ship (no firing)",
+  "sable fire        follow it and shoot (needs arm)",
   "exit",
 }
 
@@ -235,6 +291,7 @@ local function run()
     elseif c == "pitchflip" then cfg.pitchSign = -cfg.pitchSign; saveCfg(); print("pitch sign " .. cfg.pitchSign)
     elseif c == "tracks" then tracks()
     elseif c == "aimat" and a then aimAt(a)
+    elseif c == "sable" then trackSable(w[2] == "fire")
     elseif c == "exit" then fireOff(); return
     elseif c ~= "" then say(colors.orange, "unknown - type help") end
   end
