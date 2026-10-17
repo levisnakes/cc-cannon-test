@@ -1,4 +1,4 @@
--- Cannon Test v1.1.0
+-- Cannon Test v1.2.0
 -- Test + calibrate a Create Radar turret (Auto Yaw/Pitch Controller + Fire Controller) from CC.
 -- Type "help" for commands. Calibration is saved to cannon.cfg.
 
@@ -7,14 +7,80 @@ local SWEEP_WAIT = 4          -- seconds per step in "sweep"
 local CFG_FILE = "cannon.cfg"
 local TRACK_STEP = 0.25       -- seconds between aim updates when tracking
 local AIM_TOLERANCE = 3       -- degrees the aim may move per step and still count as on target
-local MIN_TARGET_DIST = 12    -- ignore Sable tracks this close (your own turret/ship)
+local MIN_TARGET_DIST = 12    -- ignore Sable tracks this close to the cannon
+local OWN_SHIP_RADIUS = 24    -- on a ship: ignore Sable tracks this close to your ship's center
 
-local cfg = { x = nil, y = nil, z = nil, yawOffset = 0, yawSign = 1, pitchOffset = 0, pitchSign = 1 }
+-- off a ship: x/y/z is the cannon's world position
+-- on a ship:  off = cannon offset in the ship's own frame, so it moves and turns with the ship
+local cfg = { x = nil, y = nil, z = nil, off = nil, yawOffset = 0, yawSign = 1, pitchOffset = 0, pitchSign = 1 }
 local armed = false
 local yawC, pitchC, fireC, radar
 local lastTracks = {}
 
 local atan2 = math.atan2 or function(y, x) return math.atan(y, x) end
+
+-- ---------- Sable ship (CC: Sable "sublevel" API) ----------
+
+local onShip = sublevel ~= nil and sublevel.isInPlotGrid ~= nil and sublevel.isInPlotGrid()
+local shipId
+
+local function qrot(q, v)
+  local tx = 2 * (q.y * v.z - q.z * v.y)
+  local ty = 2 * (q.z * v.x - q.x * v.z)
+  local tz = 2 * (q.x * v.y - q.y * v.x)
+  return { x = v.x + q.w * tx + (q.y * tz - q.z * ty),
+           y = v.y + q.w * ty + (q.z * tx - q.x * tz),
+           z = v.z + q.w * tz + (q.x * ty - q.y * tx) }
+end
+local function qinv(q) return { x = -q.x, y = -q.y, z = -q.z, w = q.w } end
+
+-- returns ship center (world) and orientation quaternion, or nil
+local function shipPose()
+  if not onShip then return nil end
+  local ok, pose = pcall(sublevel.getLogicalPose)
+  if not ok or type(pose) ~= "table" or not pose.position then return nil end
+  local o = pose.orientation or {}
+  local q = o.v and { x = o.v.x, y = o.v.y, z = o.v.z, w = o.a } or { x = o.x, y = o.y, z = o.z, w = o.w }
+  if not q.w then q = { x = 0, y = 0, z = 0, w = 1 } end
+  return pose.position, q
+end
+
+local function hasCannonPos()
+  if onShip then return cfg.off ~= nil end
+  return cfg.x ~= nil
+end
+
+-- cannon world position right now
+local function cannonPos()
+  if onShip then
+    local p, q = shipPose()
+    if not p or not cfg.off then return nil end
+    local r = qrot(q, cfg.off)
+    return p.x + r.x, p.y + r.y, p.z + r.z, q
+  end
+  return cfg.x, cfg.y, cfg.z, nil
+end
+
+-- store the cannon position from world coords (on a ship: as an offset that follows the ship)
+local function setCannonPos(x, y, z)
+  if onShip then
+    local p, q = shipPose()
+    if not p then return false end
+    cfg.off = qrot(qinv(q), { x = x - p.x, y = y - p.y, z = z - p.z })
+  else
+    cfg.x, cfg.y, cfg.z = x, y, z
+  end
+  return true
+end
+
+local function isOwnShip(t)
+  if not onShip then return false end
+  if shipId and t.id ~= nil and tostring(t.id) == shipId then return true end
+  local p = shipPose()
+  if not p or not t.position then return false end
+  local dx, dy, dz = t.position.x - p.x, t.position.y - p.y, t.position.z - p.z
+  return dx * dx + dy * dy + dz * dz < OWN_SHIP_RADIUS * OWN_SHIP_RADIUS
+end
 
 local function loadCfg()
   if not fs.exists(CFG_FILE) then return end
@@ -80,7 +146,12 @@ local function status()
   print("Pitch ctrl: " .. (pitchC or "MISSING") .. (pitchC and ("  target " .. fmt(call(pitchC, "getAngle"))) or ""))
   print("Fire ctrl:  " .. (fireC or "MISSING") .. (fireC and ("  powered " .. tostring(call(fireC, "isPowered"))) or ""))
   print("Radar:      " .. (radar or "none") .. (radar and ("  range " .. fmt(call(radar, "getRange"))) or ""))
-  print("Cannon pos: " .. (cfg.x and (cfg.x .. " " .. cfg.y .. " " .. cfg.z) or "not set (pos x y z)"))
+  if onShip then
+    local okN, name = pcall(sublevel.getName)
+    print("On ship:    " .. tostring(okN and name or "?") .. (shipPose() and "" or "  (pose unreadable!)"))
+  end
+  local cx, cy, cz = cannonPos()
+  print("Cannon pos: " .. (cx and string.format("%.1f %.1f %.1f", cx, cy, cz) or "not set (pos x y z)"))
   print("Calib: yaw " .. cfg.yawSign .. "x+" .. cfg.yawOffset .. "  pitch " .. cfg.pitchSign .. "x+" .. cfg.pitchOffset)
   if armed then say(colors.red, "ARMED") else say(colors.lime, "SAFE (type arm to allow firing)") end
 end
@@ -142,8 +213,15 @@ end
 
 -- straight-line angles to a world point (no shell drop yet)
 -- Minecraft yaw: 0 = south (+Z), 90 = west, 180 = north, 270 = east
+-- on a ship the direction is turned into the ship's frame first, because the mount turns with the ship
 local function anglesTo(x, y, z)
-  local dx, dy, dz = x - cfg.x, y - cfg.y, z - cfg.z
+  local cx, cy, cz, q = cannonPos()
+  if not cx then return 0, 0, math.huge end
+  local dx, dy, dz = x - cx, y - cy, z - cz
+  if q then
+    local v = qrot(qinv(q), { x = dx, y = dy, z = dz })
+    dx, dy, dz = v.x, v.y, v.z
+  end
   local yaw = math.deg(atan2(-dx, dz)) % 360
   local pitch = math.deg(atan2(dy, math.sqrt(dx * dx + dz * dz)))
   return (yaw * cfg.yawSign + cfg.yawOffset) % 360, pitch * cfg.pitchSign + cfg.pitchOffset,
@@ -158,22 +236,26 @@ local function tracks()
   for _, t in pairs(list) do
     if t.position then
       local d
-      if cfg.x then d = select(3, anglesTo(t.position.x, t.position.y, t.position.z)) end
-      lastTracks[#lastTracks + 1] = { t = t, d = d or 0 }
+      if hasCannonPos() then d = select(3, anglesTo(t.position.x, t.position.y, t.position.z)) end
+      lastTracks[#lastTracks + 1] = { t = t, d = d or 0, own = isOwnShip(t) }
     end
   end
-  table.sort(lastTracks, function(a, b) return a.d < b.d end)
+  -- nearest first, your own ship always last
+  table.sort(lastTracks, function(a, b)
+    if a.own ~= b.own then return b.own end
+    return a.d < b.d
+  end)
   if #lastTracks == 0 then print("radar sees nothing"); return end
   for i = 1, math.min(#lastTracks, 8) do
     local t = lastTracks[i].t
     print(i .. ") " .. tostring(t.category) .. " " .. tostring(t.entityType or "") ..
-      (cfg.x and ("  " .. fmt(lastTracks[i].d) .. "m") or ""))
+      (hasCannonPos() and ("  " .. fmt(lastTracks[i].d) .. "m") or "") .. (lastTracks[i].own and "  (your ship)" or ""))
   end
   print("aimat <n> to point at one")
 end
 
 local function aimAt(i)
-  if not cfg.x then say(colors.red, "set the cannon position first: pos x y z  (or pos gps)"); return end
+  if not hasCannonPos() then say(colors.red, "set the cannon position first: pos x y z  (or pos gps)"); return end
   local e = lastTracks[i]
   if not e then say(colors.red, "run tracks first, then aimat <n>"); return end
   local p = e.t.position
@@ -184,7 +266,7 @@ end
 
 -- follow the nearest Sable ship; with fire=true, shoot once the aim settles
 local function trackSable(fire)
-  if not cfg.x then say(colors.red, "set the cannon position first: pos x y z"); return end
+  if not hasCannonPos() then say(colors.red, "set the cannon position first: pos x y z"); return end
   if not radar then say(colors.red, "no radar connected"); return end
   if fire and not armed then say(colors.red, "SAFE - type arm first (or use: sable)"); return end
   say(colors.yellow, "Tracking nearest SABLE" .. (fire and " + FIRING" or "") .. " - any key stops")
@@ -198,7 +280,7 @@ local function trackSable(fire)
       timer = os.startTimer(TRACK_STEP)
       local best, bestD, locked
       for _, t in pairs(call(radar, "getTracks") or {}) do
-        if t.category == "SABLE" and t.position then
+        if t.category == "SABLE" and t.position and not isOwnShip(t) then
           local d = select(3, anglesTo(t.position.x, t.position.y, t.position.z))
           if d >= MIN_TARGET_DIST then
             if lockId ~= nil and t.id == lockId then locked = t end
@@ -253,6 +335,10 @@ local HELP = {
 
 local function run()
   loadCfg()
+  if onShip then
+    local ok, id = pcall(sublevel.getUniqueId)
+    if ok and id then shipId = tostring(id) end
+  end
   term.clear(); term.setCursorPos(1, 1)
   status()
   print("type help for commands")
@@ -281,10 +367,12 @@ local function run()
       fireOff(); call(yawC, "stopAuto"); call(pitchC, "stopAuto"); print("stopped")
     elseif c == "pos" and w[2] == "gps" then
       local x, y, z = gps.locate(2)
-      if x then cfg.x, cfg.y, cfg.z = math.floor(x), math.floor(y), math.floor(z); saveCfg(); print("pos " .. cfg.x .. " " .. cfg.y .. " " .. cfg.z)
+      if x and setCannonPos(x, y, z) then saveCfg(); print(string.format("pos %.1f %.1f %.1f", x, y, z))
       else say(colors.red, "no GPS fix - use pos x y z") end
     elseif c == "pos" and a and b and tonumber(w[4]) then
-      cfg.x, cfg.y, cfg.z = a, b, tonumber(w[4]); saveCfg(); print("saved")
+      if setCannonPos(a, b, tonumber(w[4])) then
+        saveCfg(); print(onShip and "saved - it now follows the ship" or "saved")
+      else say(colors.red, "can't read the ship's position") end
     elseif c == "yawoff" and a then cfg.yawOffset = a; saveCfg(); print("saved")
     elseif c == "pitchoff" and a then cfg.pitchOffset = a; saveCfg(); print("saved")
     elseif c == "yawflip" then cfg.yawSign = -cfg.yawSign; saveCfg(); print("yaw sign " .. cfg.yawSign)

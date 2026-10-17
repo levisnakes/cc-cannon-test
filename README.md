@@ -36,6 +36,8 @@ You don't need Data Links or a Network Controller for CC control.
 | `sable` | follow the nearest Sable ship (keeps the same ship while it's visible, ignores anything within 12 blocks) |
 | `sable fire` | same, and shoots once the aim settles (needs `arm`) |
 
+**On a Sable ship** (needs CC: Sable): the script reads the ship's position and rotation every step. `pos x y z` is still the cannon's world coords from F3, entered once; after that the cannon position follows the ship, aiming is done in the ship's own frame, and your own ship (same id, or within 24 blocks of its center) is never targeted. Do `sweep` and the calibration with the ship sitting level.
+
 `aimat` assumes Minecraft yaw (0 = south, 90 = west, 180 = north, 270 = east) and aims in a straight line with no shell drop. Use `sweep`, then `yawoff`/`yawflip` until `aimat` points the right way.
 
 The Fire Controller switches itself off 0.5s after the last command, so `burst` repeats `keepFiring()` every 0.25s.
